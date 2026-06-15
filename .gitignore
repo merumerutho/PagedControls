@@ -1,0 +1,5 @@
+# Compiled host test binaries
+tests/test_paged_controls
+tests/test_paged_controls.exe
+tests/test_macro_map
+tests/test_macro_map.exe

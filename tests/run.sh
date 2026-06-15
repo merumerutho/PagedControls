@@ -5,5 +5,8 @@ cd "$(dirname "$0")"
 CXX="${CXX:-g++}"
 echo "Building PagedControls tests..."
 $CXX -std=c++17 -O2 -Wall test_paged_controls.cpp -o test_paged_controls
+$CXX -std=c++17 -O2 -Wall test_macro_map.cpp -o test_macro_map
 echo
 ./test_paged_controls
+echo
+./test_macro_map

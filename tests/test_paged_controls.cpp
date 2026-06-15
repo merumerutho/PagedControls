@@ -86,22 +86,19 @@ static void test_led_counts_page()
 {
     std::printf("- led_flashes_page_number\n");
     const float d[3][4] = {{0,0,0,0},{0,0,0,0},{0,0,0,0}};
-    float k[4] = {0,0,0,0};
     const PC::LedTiming t = {15, 40, 110};
     for (size_t page = 0; page < 3; ++page)
     {
         PC pc; pc.Init(d, 0.03f, t);
         pc.GoToPage(page);
-        const uint32_t cycle = (uint32_t)(page + 1) * t.period_blocks + t.rest_blocks;
-        // Over exactly one cycle, blink takes each value in [0,cycle) once, so the
-        // lit-block count is phase-independent: (page+1) pulses * on_blocks each.
+        const uint32_t cycle = (uint32_t)(page + 1) * t.period_ticks + t.rest_ticks;
+        // LedOn is pure in the external tick. Over exactly one cycle each tick value
+        // in [0,cycle) occurs once, so the lit count is phase-independent:
+        // (page+1) pulses * on_ticks each.
         int lit = 0;
-        for (uint32_t b = 0; b < cycle; ++b)
-        {
-            pc.Process(k, false);
-            if (pc.LedOn()) ++lit;
-        }
-        CHECK(lit == (int)((page + 1) * t.on_blocks));
+        for (uint32_t tick = 0; tick < cycle; ++tick)
+            if (pc.LedOn(tick)) ++lit;
+        CHECK(lit == (int)((page + 1) * t.on_ticks));
     }
 }
 

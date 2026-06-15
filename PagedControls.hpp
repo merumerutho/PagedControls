@@ -7,7 +7,7 @@
 #include <cmath>
 
 // PagedControls - "parameter pages + soft-takeover pickup + LED indicator" with a
-// folded-in *virtualization (macro) layer*:
+// *virtualization (macro) layer*:
 // a small data-driven routing matrix that maps a few knob values ("macros") onto
 // many derived parameters, through per-route input windows, output ranges, and
 // curves. Targets can be real params OR other derived nodes, so routes chain.
@@ -40,9 +40,8 @@ enum class Op : uint8_t {
     Min,  // dst  = min(dst, v)
 };
 
-// A single mapping edge. Defaults give the common case "full input range, full
-// output range, linear, overwrite". Field order is tuned so the frequent
-// "custom output range, default input window" route is a two-liner:
+// A single mapping edge. Defaults give "full input range, full output range,
+// linear, overwrite", so the common custom-output-range route is just:
 //     { SRC, DST, out0, out1 }
 struct Route {
     uint16_t src, dst;          // node indices (input or derived)
@@ -52,14 +51,14 @@ struct Route {
     Op       op    = Op::Set;
 };
 
-// A curve is sampled from `fn(t, param)` (t in [0,1]) into a LUT at Init time, so
-// the per-block hot path is just a table lookup + lerp -- no transcendentals.
+// A curve is sampled from `fn(t, param)` (t in [0,1]) into a LUT at Init, so the
+// hot path is a table lookup + lerp, not a transcendental.
 struct CurveDef {
     float (*fn)(float t, float param);
     float param;
 };
 
-// Library-supplied generators (the transcendental cost is paid once, at Init).
+// Library-supplied curve generators.
 namespace curve {
 inline float Linear(float t, float)   { return t; }
 inline float Pow   (float t, float k) { return std::pow(t, k); }                 // k>1 ease-in
@@ -95,10 +94,7 @@ class PagedControls
 public:
     static constexpr size_t kGridSize = NumPages * NumKnobs;
 
-    // LED count-flash timing, in caller-defined *ticks* (whatever unit you pass to
-    // LedOn -- e.g. audio blocks or milliseconds). Page p emits (p+1) pulses then
-    // rests, so you can count the flashes. Defaults suit ticks at a ~150-200 Hz
-    // block rate.
+    // LED count-flash timing, in the *tick* unit you pass to LedOn.
     struct LedTiming
     {
         uint32_t on_ticks;     // pulse "lit" duration
@@ -149,13 +145,11 @@ public:
 
     // The UI tick: paging + soft-takeover pickup. `knobs` is NumKnobs values in
     // 0..1; `advance_page` is the (already-debounced) button-tap edge. On a page
-    // change the pickup is reset so knobs must be re-caught. (The LED is a separate
-    // pure query, LedOn(tick), so this has no required cadence.)
+    // change the pickup is reset so knobs must be re-caught.
     //
     // `do_eval` controls whether the routed node graph is refreshed here:
-    //   * true (default): convenient one-call usage; nodes are fresh after Process.
-    //   * false: skip routing. Pair with Resolve() called elsewhere (e.g. the main
-    //     loop) so the (possibly costly) macro eval can run off the audio thread.
+    //   * true (default): nodes are fresh after Process.
+    //   * false: skip routing; call Resolve() elsewhere to decouple the macro eval.
     void Process(const float* knobs, bool advance_page, bool do_eval = true)
     {
         if (advance_page) GoToPage((page_ + 1) % NumPages);
@@ -167,7 +161,7 @@ public:
     }
 
     // Refresh the routed node graph from the current grid. Decoupled from Process
-    // so the macro eval can run off the audio thread (call from the main loop).
+    // so the macro eval can be run separately.
     void Resolve() { Evaluate(); }
 
     // Jump directly to a page (e.g. restoring UI state); resets knob pickup.
@@ -187,10 +181,8 @@ public:
     size_t Page()                          const { return page_; }
     bool   PickedUp(size_t knob)           const { return picked_[knob]; }
 
-    // Pure LED state for a given monotonic `tick` (same unit as LedTiming). The
-    // caller owns the clock and the GPIO write, so nothing in this class needs to
-    // run at a fixed cadence or inside an audio ISR. Page p lights (p+1) pulses
-    // then rests, so you can count the flashes.
+    // LED state for monotonic `tick` (same unit as LedTiming). Page p lights
+    // (p+1) pulses then rests.
     bool LedOn(uint32_t tick) const
     {
         const uint32_t np = (uint32_t)page_ + 1;
@@ -200,7 +192,7 @@ public:
         return false;
     }
 
-    // Optional persistence: copy the whole *macro grid* out / in (e.g. to flash).
+    // Optional persistence: copy the whole *macro grid* out / in.
     // The destination/source must be GridSize() floats.
     void SaveGrid(float* dst) const
     {
@@ -236,7 +228,7 @@ private:
     }
 
     // Sample each curve into its LUT. Missing curves (index >= num supplied, or a
-    // null fn) fall back to linear, so curve 0 is always a safe linear default.
+    // null fn) fall back to linear.
     void BuildCurves(const CurveDef* defs, size_t num)
     {
         for (size_t c = 0; c < NumCurves; ++c)
@@ -307,7 +299,7 @@ private:
         return false;
     }
 
-    // Paging / pickup / LED state (unchanged from the original PagedControls).
+    // Paging / pickup / LED state.
     float     slot_[NumPages][NumKnobs] = {};
     bool      picked_[NumKnobs]         = {};
     size_t    page_   = 0;

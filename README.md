@@ -6,25 +6,22 @@ them into **pages** (cycled with a button), featuring **soft-takeover ("pickup")
 switching pages never makes a parameter jump, and an **LED page indicator**.
 
 `pagedctl::PagedControls` (in `PagedControls.hpp`) folds the paging UX together with
-an optional **macro / virtualization layer** — a small data-driven routing matrix
-that maps a few knob values onto many derived parameters. Used with its default
-template args and no routes, it is just the classic paged-controls UI.
+an optional **macro / virtualization layer** — a small routing matrix
+that can be used to map a few knob values onto many derived parameters.
 
 ## Features
 - Holds a grid of `NumPages x NumKnobs` stored values (0..1).
 - Each page remembers its own knob values.
 - **Pickup**: after a page change, a knob only starts tracking once it moves
   within `pickup_threshold` of that page's stored value (no parameter jumps).
-- **LED**: a count-flash pattern — page `p` blinks `(p+1)` times then rests, so
-  you can read the page by counting flashes. `LedOn(tick)` is a **pure** function of
-  a caller-supplied monotonic tick (blocks, milliseconds, whatever matches your
-  `LedTiming`), so the class holds the blink *timing* but not the *clock* — nothing
-  here needs to run at a fixed cadence or in an audio ISR.
+- **LED**: a count-flash pattern — page `p` blinks `(p+1)` times then rests.
+  `LedOn(tick)` is a **pure** function of a caller-supplied monotonic tick (whatever
+  unit matches your `LedTiming`).
 - **Macro layer** (optional): route knobs ("macros") to many derived parameters
   through per-route input windows, output ranges (with inversion), reshaping
   curves, and combine ops. Targets can be real params *or* other derived nodes,
   so routes chain. See below.
-- Optional `SaveGrid`/`LoadGrid` for persistence (e.g. to flash).
+- Optional `SaveGrid`/`LoadGrid` for persistence.
 
 
 ## Usage
@@ -35,7 +32,7 @@ pagedctl::PagedControls<2, 4> pg;                 // 2 pages, 4 knobs
 const float defaults[2][4] = {{0.42f,1,1,0.5f}, {0,0.5f,0.2f,0}};
 pg.Init(defaults, /*pickup=*/0.03f, /*LED*/{15,40,110});
 
-// call regularly (host glue reads the knobs + button edge) -- no fixed rate needed:
+// call regularly (host glue reads the knobs + button edge):
 pg.Process(knob_values, button_falling_edge);
 float rt60 = pg.Value(0, 0);                      // map grid -> your params
 bool  led  = pg.LedOn(tick++);                    // pure: pass your own monotonic tick
@@ -45,8 +42,8 @@ bool  led  = pg.LedOn(tick++);                    // pure: pass your own monoton
 
 The node graph is one flat array. The first `GridSize = NumPages*NumKnobs` nodes
 are the **inputs** (the grid, page-major); the remaining nodes are **derived**
-(virtuals and real params). A `constexpr` table of `Route`s (lives in flash) is
-evaluated top-to-bottom once per `Process()`:
+(virtuals and real params). A `constexpr` table of `Route`s is evaluated
+top-to-bottom once per `Process()`:
 
 ```cpp
 using namespace pagedctl;
@@ -86,16 +83,8 @@ float rt60 = ctl.Out(P_RT60);     // resolved derived value
   (virtual → virtual → real). Order matters — producers before consumers.
 
 `Out(node)` returns the resolved value; `Value/Active/Page/LedOn/SaveGrid/LoadGrid`
-behave as before (persistence still stores the *macro* grid). With the default
-`NumNodes == GridSize` and no routes, the layer is inert.
-
-**Threading / the audio ISR:** because `LedOn(tick)` is pure (you own the clock),
-`Process()` and the routing have no required cadence — run the whole control update
-in your main loop and let the ISR read the resolved `Out()` snapshot, computing
-`LedOn(blockCounter++)` (the ISR is a natural block-rate clock) only to drive the
-LED pin. If you do prefer to call `Process()` from the ISR, pass
-`Process(knobs, edge, /*do_eval=*/false)` and run the heavier `Resolve()` from the
-main loop.
+work independently of routing (persistence stores the *macro* grid). With the
+default `NumNodes == GridSize` and no routes, the layer is inert.
 
 ## Tests
 `tests/run.sh` (or `run.bat`):

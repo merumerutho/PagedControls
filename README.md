@@ -5,11 +5,10 @@ Controlling many parameters from a few physical knobs by grouping
 them into **pages** (cycled with a button), featuring **soft-takeover ("pickup")** so
 switching pages never makes a parameter jump, and an **LED page indicator**.
 
-The class is now **`PagedMacroControls`** (in `PagedMacroControls.hpp`), which folds
-the paging UX together with an optional **macro / virtualization layer** — a small
-data-driven routing matrix that maps a few knob values onto many derived parameters.
-`PagedControls.hpp` and the `pagedctl::PagedControls<P,K>` name remain as a
-back-compat alias for the no-routing configuration, so existing code is unchanged.
+`pagedctl::PagedControls` (in `PagedControls.hpp`) folds the paging UX together with
+an optional **macro / virtualization layer** — a small data-driven routing matrix
+that maps a few knob values onto many derived parameters. Used with its default
+template args and no routes, it is just the classic paged-controls UI.
 
 ## Features
 - Holds a grid of `NumPages x NumKnobs` stored values (0..1).
@@ -52,7 +51,7 @@ evaluated top-to-bottom once per `Process()`:
 ```cpp
 using namespace pagedctl;
 // 2 pages x 4 knobs (8 inputs) + 4 derived params; 2 curves.
-PagedMacroControls<2, 4, /*NumNodes=*/12, /*NumCurves=*/2> ctl;
+PagedControls<2, 4, /*NumNodes=*/12, /*NumCurves=*/2> ctl;
 
 enum { M_DECAY=0, M_TONE, M_SHIMMER, M_MIX,   /* page 0 */
        M_SPACE, M_MOTION, M_VOICE, M_FREEZE,  /* page 1 */
@@ -87,8 +86,8 @@ float rt60 = ctl.Out(P_RT60);     // resolved derived value
   (virtual → virtual → real). Order matters — producers before consumers.
 
 `Out(node)` returns the resolved value; `Value/Active/Page/LedOn/SaveGrid/LoadGrid`
-behave as before (persistence still stores the *macro* grid). With `NumNodes ==
-GridSize` and no routes (the `PagedControls` alias), the layer is inert.
+behave as before (persistence still stores the *macro* grid). With the default
+`NumNodes == GridSize` and no routes, the layer is inert.
 
 **Threading / the audio ISR:** because `LedOn(tick)` is pure (you own the clock),
 `Process()` and the routing have no required cadence — run the whole control update
@@ -105,4 +104,4 @@ main loop.
 - `test_macro_map`: input window clamp + output inversion, every op
   (Set/Add/Mul/Max/Min), curve LUTs vs their generators (sample points + interp),
   virtual→virtual chaining + evaluation order, macro fan-out with live pickup, and
-  the back-compat alias.
+  the plain (no-routing) configuration.

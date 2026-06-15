@@ -1,8 +1,9 @@
 // Host tests for the macro (virtualization) routing layer folded into
-// PagedMacroControls: input windows + clamping, output ranges + inversion, every
-// op (Set/Add/Mul/Max/Min), curve LUTs vs their generators (sample points + interp),
-// virtual->virtual chaining + evaluation order, and the back-compat alias.
-#include "../PagedMacroControls.hpp"
+// PagedControls macro layer: input windows + clamping, output ranges + inversion,
+// every op (Set/Add/Mul/Max/Min), curve LUTs vs their generators (sample points +
+// interp), virtual->virtual chaining + evaluation order, and the plain (no-routing)
+// configuration.
+#include "../PagedControls.hpp"
 #include <cstdio>
 #include <cmath>
 
@@ -19,7 +20,7 @@ static void check(bool c, const char* e, int line)
 #define NEARt(a,b,t) check(std::fabs((a) - (b)) < (t), #a " ~= " #b, __LINE__)
 
 // 2 pages x 4 knobs -> 8 input nodes; derived nodes start at index 8.
-using MC = PagedMacroControls<2, 4, /*NumNodes=*/16, /*NumCurves=*/4, /*CurveRes=*/33>;
+using MC = PagedControls<2, 4, /*NumNodes=*/16, /*NumCurves=*/4, /*CurveRes=*/33>;
 static constexpr size_t G = MC::kGridSize; // 8
 
 // Node aliases for readability.
@@ -34,7 +35,7 @@ static void grid(float (&d)[2][4], float a, float b, float c, float e,
     d[1][0]=f; d[1][1]=g; d[1][2]=h; d[1][3]=i;
 }
 
-// Reference curve LUT eval (mirrors PagedMacroControls::ApplyCurve) so interp
+// Reference curve LUT eval (mirrors PagedControls::ApplyCurve) so interp
 // expectations are computed identically to the implementation.
 static float refCurve(float (*fn)(float,float), float param, float t)
 {
@@ -209,12 +210,12 @@ static void test_deferred_eval()
     NEAR(mc.Out(D0),     0.8f);
 }
 
-static void test_alias_compat()
+static void test_plain_no_routing()
 {
-    std::printf("- pagedcontrols_alias_no_routing\n");
-    PagedControls<2, 4> pg;            // alias -> PagedMacroControls<2,4,8>
+    std::printf("- plain_no_routing\n");
+    PagedControls<2, 4> pg;            // default NumNodes == grid, no routes
     const float d[2][4] = {{0.1f,0.2f,0.3f,0.4f},{0.5f,0.6f,0.7f,0.8f}};
-    pg.Init(d, 0.03f);                 // legacy Init signature
+    pg.Init(d, 0.03f);                 // plain Init signature
     NEAR(pg.Value(0, 2), 0.3f);
     CHECK(pg.Page() == 0);
     // With no derived nodes, Out() mirrors the flattened grid (page-major).
@@ -224,14 +225,14 @@ static void test_alias_compat()
 
 int main()
 {
-    std::printf("PagedMacroControls macro-layer tests\n");
+    std::printf("PagedControls macro-layer tests\n");
     test_window_and_inversion();
     test_ops();
     test_curves();
     test_virtual_chain();
     test_fanout_and_live_update();
     test_deferred_eval();
-    test_alias_compat();
+    test_plain_no_routing();
     std::printf("\n%d check(s), %d failure(s)\n", g_checks, g_fail);
     if (g_fail == 0) std::printf("ALL MACRO-LAYER TESTS PASSED\n");
     return g_fail ? 1 : 0;

@@ -77,6 +77,91 @@ inline float Log(float t, float k)
 inline float SCurve(float t, float)   { return t * t * (3.0f - 2.0f * t); }     // smoothstep
 } // namespace curve
 
+// MacroMap - the routing/curve evaluator on its own, so a module can own a
+// private route table (e.g. one table per effect) without a paged UI.
+// Nodes [0, num_inputs) are written from the inputs passed to Evaluate();
+// the remaining nodes are derived, seeded from `base` (or 0) before routing.
+template <size_t NumNodes, size_t NumCurves = 1, size_t CurveRes = 33>
+class MacroMap
+{
+    static_assert(NumNodes >= 1, "need at least one node");
+    static_assert(NumCurves >= 1, "need at least one curve");
+    static_assert(CurveRes  >= 2, "curve needs at least two samples");
+
+public:
+    void Init(const Route*    routes,
+              size_t          num_routes,
+              const CurveDef* curves     = nullptr,
+              size_t          num_curves = 0,
+              const float*    base       = nullptr)
+    {
+        routes_   = routes;
+        n_routes_ = routes ? num_routes : 0;
+        base_     = base;
+        for (size_t c = 0; c < NumCurves; ++c)
+            for (size_t j = 0; j < CurveRes; ++j)
+            {
+                const float t = (float)j / (float)(CurveRes - 1);
+                curves_[c][j] = (c < num_curves && curves && curves[c].fn)
+                                    ? curves[c].fn(t, curves[c].param)
+                                    : t;
+            }
+    }
+
+    // Copy `num_inputs` input values into nodes [0, num_inputs), seed the
+    // derived nodes, then run every route top-to-bottom.
+    void Evaluate(const float* inputs, size_t num_inputs)
+    {
+        if (num_inputs > NumNodes) num_inputs = NumNodes;
+        for (size_t i = 0; i < num_inputs; ++i) node_[i] = inputs[i];
+        for (size_t i = num_inputs; i < NumNodes; ++i)
+            node_[i] = base_ ? base_[i] : 0.0f;
+
+        for (size_t r = 0; r < n_routes_; ++r)
+        {
+            const Route& e = routes_[r];
+            if (e.src >= NumNodes || e.dst >= NumNodes) continue;
+            const float span = e.in1 - e.in0;
+            float       t;
+            if (span == 0.0f) t = (node_[e.src] >= e.in1) ? 1.0f : 0.0f; // step
+            else              t = (node_[e.src] - e.in0) / span;
+            if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+            t = ApplyCurve(e.curve, t);
+
+            const float v = e.out0 + t * (e.out1 - e.out0);
+            float&      d = node_[e.dst];
+            switch (e.op)
+            {
+                case Op::Set: d  = v;           break;
+                case Op::Add: d += v;           break;
+                case Op::Mul: d *= v;           break;
+                case Op::Max: if (v > d) d = v; break;
+                case Op::Min: if (v < d) d = v; break;
+            }
+        }
+    }
+
+    float Out(size_t node) const { return node_[node < NumNodes ? node : 0]; }
+
+private:
+    // Linear interpolation into a curve LUT. `t` is assumed clamped to [0,1].
+    float ApplyCurve(uint8_t c, float t) const
+    {
+        if (c >= NumCurves) c = 0;
+        const float x = t * (float)(CurveRes - 1);
+        size_t      i = (size_t)x;
+        if (i >= CurveRes - 1) return curves_[c][CurveRes - 1];
+        const float f = x - (float)i;
+        return curves_[c][i] + f * (curves_[c][i + 1] - curves_[c][i]);
+    }
+
+    float        node_[NumNodes]              = {};
+    float        curves_[NumCurves][CurveRes] = {};
+    const Route* routes_   = nullptr;
+    size_t       n_routes_ = 0;
+    const float* base_     = nullptr;
+};
+
 template <size_t NumPages,
           size_t NumKnobs  = 4,
           size_t NumNodes  = NumPages * NumKnobs,
@@ -93,6 +178,8 @@ class PagedControls
 
 public:
     static constexpr size_t kGridSize = NumPages * NumKnobs;
+    // LockKnob() argument meaning "follow the current page".
+    static constexpr size_t kNoLock = static_cast<size_t>(-1);
 
     // LED count-flash timing, in the *tick* unit you pass to LedOn.
     struct LedTiming
@@ -121,11 +208,8 @@ public:
               float           pickup_threshold = 0.03f,
               LedTiming       led = {15, 40, 110})
     {
-        routes_   = routes;
-        n_routes_ = routes ? num_routes : 0;
-        base_     = base;
         InitCommon(defaults, pickup_threshold, led);
-        BuildCurves(curves, curves ? num_curves : 0);
+        map_.Init(routes, num_routes, curves, num_curves, base);
         Evaluate();
     }
 
@@ -135,17 +219,17 @@ public:
               float     pickup_threshold = 0.03f,
               LedTiming led = {15, 40, 110})
     {
-        routes_   = nullptr;
-        n_routes_ = 0;
-        base_     = nullptr;
         InitCommon(defaults, pickup_threshold, led);
-        BuildCurves(nullptr, 0); // curve 0 = linear
+        map_.Init(nullptr, 0); // curve 0 = linear
         Evaluate();
     }
 
     // The UI tick: paging + soft-takeover pickup. `knobs` is NumKnobs values in
     // 0..1; `advance_page` is the (already-debounced) button-tap edge. On a page
-    // change the pickup is reset so knobs must be re-caught.
+    // change the pickup is reset so knobs must be re-caught. A knob picks up when
+    // it comes within `pickup_threshold` of the stored value or crosses it
+    // between two calls (so fast moves and stepped CV cannot skip the window).
+    // A locked knob (LockKnob) always writes its locked page.
     //
     // `do_eval` controls whether the routed node graph is refreshed here:
     //   * true (default): nodes are fresh after Process.
@@ -155,7 +239,7 @@ public:
         if (advance_page) GoToPage((page_ + 1) % NumPages);
 
         for (size_t k = 0; k < NumKnobs; ++k)
-            if (PickedUp(k, knobs[k])) slot_[page_][k] = knobs[k];
+            if (PickedUp(k, knobs[k])) slot_[TargetPage(k)][k] = knobs[k];
 
         if (do_eval) Evaluate();
     }
@@ -164,20 +248,43 @@ public:
     // so the macro eval can be run separately.
     void Resolve() { Evaluate(); }
 
-    // Jump directly to a page (e.g. restoring UI state); resets knob pickup.
+    // Jump directly to a page (e.g. restoring UI state); resets the pickup of
+    // every knob that follows the page. Locked knobs are unaffected.
     void GoToPage(size_t page)
     {
         if (page >= NumPages) return;
         page_ = page;
-        for (size_t k = 0; k < NumKnobs; ++k) picked_[k] = false;
+        for (size_t k = 0; k < NumKnobs; ++k)
+            if (lock_[k] == kNoLock) picked_[k] = false;
+    }
+
+    // Pin a knob to one page regardless of the current page (kNoLock follows
+    // the page again). The knob must be re-caught on its new target page.
+    void LockKnob(size_t knob, size_t page)
+    {
+        if (knob >= NumKnobs) return;
+        lock_[knob]   = page < NumPages ? page : kNoLock;
+        picked_[knob] = false;
+    }
+    size_t KnobLock(size_t knob) const { return lock_[knob]; }
+
+    // Overwrite one stored value (e.g. reset to a neutral position). Any knob
+    // currently targeting that slot must be re-caught.
+    void SetValue(size_t page, size_t knob, float value)
+    {
+        if (page >= NumPages || knob >= NumKnobs) return;
+        slot_[page][knob] = value;
+        if (TargetPage(knob) == page) picked_[knob] = false;
+        Evaluate();
     }
 
     // ---- Accessors ----
     // Resolved node value (input or derived) after the last Process/Init.
-    float  Out(size_t node)                const { return node_[node < NumNodes ? node : 0]; }
+    float  Out(size_t node)                const { return map_.Out(node); }
     // Raw stored grid value (the macro the user set), independent of routing.
     float  Value(size_t page, size_t knob) const { return slot_[page][knob]; }
-    float  Active(size_t knob)             const { return slot_[page_][knob]; }
+    // Stored value the knob currently drives (its locked page, else the current page).
+    float  Active(size_t knob)             const { return slot_[TargetPage(knob)][knob]; }
     size_t Page()                          const { return page_; }
     bool   PickedUp(size_t knob)           const { return picked_[knob]; }
 
@@ -224,65 +331,20 @@ private:
         for (size_t p = 0; p < NumPages; ++p)
             for (size_t k = 0; k < NumKnobs; ++k)
                 slot_[p][k] = defaults[p][k];
-        for (size_t k = 0; k < NumKnobs; ++k) picked_[k] = false;
-    }
-
-    // Sample each curve into its LUT. Missing curves (index >= num supplied, or a
-    // null fn) fall back to linear.
-    void BuildCurves(const CurveDef* defs, size_t num)
-    {
-        for (size_t c = 0; c < NumCurves; ++c)
-            for (size_t j = 0; j < CurveRes; ++j)
-            {
-                const float t = (float)j / (float)(CurveRes - 1);
-                curves_[c][j] = (c < num && defs && defs[c].fn)
-                                    ? defs[c].fn(t, defs[c].param)
-                                    : t;
-            }
-    }
-
-    // Linear interpolation into a curve LUT. `t` is assumed clamped to [0,1].
-    float ApplyCurve(uint8_t c, float t) const
-    {
-        if (c >= NumCurves) c = 0;
-        const float  x = t * (float)(CurveRes - 1);
-        size_t       i = (size_t)x;
-        if (i >= CurveRes - 1) return curves_[c][CurveRes - 1];
-        const float f = x - (float)i;
-        return curves_[c][i] + f * (curves_[c][i + 1] - curves_[c][i]);
-    }
-
-    // Refresh the node graph: copy grid -> inputs, seed derived, run routes.
-    void Evaluate()
-    {
-        for (size_t p = 0; p < NumPages; ++p)
-            for (size_t k = 0; k < NumKnobs; ++k)
-                node_[p * NumKnobs + k] = slot_[p][k];
-
-        for (size_t i = kGridSize; i < NumNodes; ++i)
-            node_[i] = base_ ? base_[i] : 0.0f;
-
-        for (size_t r = 0; r < n_routes_; ++r)
+        for (size_t k = 0; k < NumKnobs; ++k)
         {
-            const Route& e    = routes_[r];
-            const float  span = e.in1 - e.in0;
-            float        t;
-            if (span == 0.0f)       t = (node_[e.src] >= e.in1) ? 1.0f : 0.0f; // step
-            else                    t = (node_[e.src] - e.in0) / span;
-            if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-            t = ApplyCurve(e.curve, t);
-
-            const float v = e.out0 + t * (e.out1 - e.out0);
-            float&      d = node_[e.dst];
-            switch (e.op)
-            {
-                case Op::Set: d  = v;                 break;
-                case Op::Add: d += v;                 break;
-                case Op::Mul: d *= v;                 break;
-                case Op::Max: if (v > d) d = v;       break;
-                case Op::Min: if (v < d) d = v;       break;
-            }
+            picked_[k]    = false;
+            have_last_[k] = false;
+            lock_[k]      = kNoLock;
         }
+    }
+
+    // Refresh the node graph: the grid (page-major) is the input region.
+    void Evaluate() { map_.Evaluate(&slot_[0][0], kGridSize); }
+
+    size_t TargetPage(size_t knob) const
+    {
+        return lock_[knob] == kNoLock ? page_ : lock_[knob];
     }
 
     uint32_t CycleTicks() const
@@ -292,26 +354,31 @@ private:
 
     bool PickedUp(size_t knob, float physical)
     {
+        const float stored = slot_[TargetPage(knob)][knob];
+        const float prev   = last_[knob];
+        const bool  had    = have_last_[knob];
+        last_[knob]        = physical;
+        have_last_[knob]   = true;
         if (picked_[knob]) return true;
-        float d = physical - slot_[page_][knob];
+        float d = physical - stored;
         if (d < 0.0f) d = -d;
-        if (d < pickup_) { picked_[knob] = true; return true; }
+        const bool crossed = had && (prev - stored) * (physical - stored) <= 0.0f;
+        if (d < pickup_ || crossed) { picked_[knob] = true; return true; }
         return false;
     }
 
     // Paging / pickup / LED state.
     float     slot_[NumPages][NumKnobs] = {};
     bool      picked_[NumKnobs]         = {};
+    float     last_[NumKnobs]           = {}; // previous physical value per knob
+    bool      have_last_[NumKnobs]      = {};
+    size_t    lock_[NumKnobs]           = {};
     size_t    page_   = 0;
     float     pickup_ = 0.03f;
     LedTiming led_    = {15, 40, 110};
 
     // Macro routing state.
-    float        node_[NumNodes]            = {};
-    float        curves_[NumCurves][CurveRes] = {};
-    const Route* routes_   = nullptr;
-    size_t       n_routes_ = 0;
-    const float* base_     = nullptr;
+    MacroMap<NumNodes, NumCurves, CurveRes> map_;
 };
 
 } // namespace pagedctl
